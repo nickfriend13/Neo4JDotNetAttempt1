@@ -11,6 +11,7 @@ using System.Threading.Tasks;
 
 namespace Neo4JDotNetAttempt1
 {
+
     public class Movie
     {
         public Movie(string title, long released, string tagline)
@@ -26,53 +27,48 @@ namespace Neo4JDotNetAttempt1
         public override string ToString() => $"\t{Title} ({Released}) - \"{Tagline}\"";
     }
 
-    public class NodeDto
-    {
-        public NodeDto(string id, Dictionary<string, object> properties)
-        {
-            Id = id;
-            Properties = properties;
-        }
-
-        public string Id { get; set; }
-        public Dictionary<string, object> Properties { get; set; }
-    }
 
     class Program
     {
-        static async Task<List<Movie>> QueryMoviesAsync(IDriver driver, int queryId, CancellationToken token)
-        {
-            var movies = new List<Movie>();
-            await using var session = driver.AsyncSession(o => o.WithDatabase("neo4j"));
-            var cypher = "MATCH (n:Movie) RETURN n";
-            var cursor = await session.RunAsync(cypher);
-            var records = await cursor.ToListAsync(token);
+        // static async Task<List<Movie>> QueryMoviesAsync(IDriver driver, int queryId, CancellationToken token)
+        // {
+        //     var movies = new List<Movie>();
+        //     Stopwatch stopwatch = new Stopwatch();
+        //     stopwatch.Start();
+        //     await using var session = driver.AsyncSession(o => o.WithDatabase("neo4j"));
+            
+        //     var cypher = "MATCH (n:Movie) RETURN n";
+        //     var cursor = await session.RunAsync(cypher);
+        //     var records = await cursor.ToListAsync(token);
 
-            foreach (var record in records)
-            {
-                var node = record["n"]?.As<INode>();
-                if (node == null) continue;
+        //     foreach (var record in records)
+        //     {
+        //         var node = record["n"]?.As<INode>();
+        //         if (node == null) continue;
 
-                node.Properties.TryGetValue("title", out var titleObj);
-                node.Properties.TryGetValue("released", out var releasedObj);
-                node.Properties.TryGetValue("tagline", out var taglineObj);
+        //         node.Properties.TryGetValue("title", out var titleObj);
+        //         node.Properties.TryGetValue("released", out var releasedObj);
+        //         node.Properties.TryGetValue("tagline", out var taglineObj);
 
-                var title = titleObj?.ToString() ?? "Unknown";
-                var released = releasedObj.As<long>();
-                var tagline = taglineObj?.ToString() ?? "";
+        //         var title = titleObj?.ToString() ?? "Unknown";
+        //         var released = releasedObj.As<long>();
+        //         var tagline = taglineObj?.ToString() ?? "";
 
-                movies.Add(new Movie(title, released, tagline));
-            }
+        //         movies.Add(new Movie(title, released, tagline));
+        //     }
+        //     stopwatch.Stop();
+        //     Console.WriteLine($"Query {queryId} finished with {movies.Count} movies in {stopwatch.ElapsedMilliseconds}ms");
+        //     return movies;
+        // }
 
-            Console.WriteLine($"Query {queryId} finished with {movies.Count} movies");
-            return movies;
-        }
 
         static async Task Main(string[] args)
         {
             var builder = WebApplication.CreateBuilder(args);
             builder.Services.AddEndpointsApiExplorer();
             builder.Services.AddSwaggerGen();
+          
+        
 
             await using var driver = GraphDatabase.Driver(
                 "bolt://localhost:7687",
@@ -80,25 +76,7 @@ namespace Neo4JDotNetAttempt1
             );
 
             await driver.VerifyConnectivityAsync();
-
-            // Run multiple queries in parallel
-            var tasks = Enumerable.Range(1, 3).Select(async i =>
-            {
-                using var perQueryCts = new CancellationTokenSource(TimeSpan.FromSeconds(30));
-                try
-                {
-                    return await QueryMoviesAsync(driver, i, perQueryCts.Token);
-                }
-                catch (OperationCanceledException)
-                {
-                    Console.WriteLine($"Error: Query {i} timed out.");
-                    return new List<Movie>();
-                }
-            }).ToList();
-
-            var allResults = await Task.WhenAll(tasks);
-            var allMovies = allResults.SelectMany(m => m).ToList();
-            var uniqueMovies = allMovies.GroupBy(m => m.Title).Select(g => g.First()).ToList();
+            Console.WriteLine("Connected to Neo4j database.");
 
             var app = builder.Build();
 
@@ -106,42 +84,108 @@ namespace Neo4JDotNetAttempt1
             app.UseSwagger();
             app.UseSwaggerUI();
 
-            app.MapGet("/", () => "see /swagger for instructions");
+
+            app.MapGet("/", () => { return "go to /swagger "; });
+            app.MapGet("/shutdown", () =>
+            {//exit program gracefully
+            
+                Console.WriteLine("Shutting down... Press any key but q to exit.");
+                if(Console.ReadLine() == "q")
+                {
+                   //keep running
+                    Console.WriteLine("Continuing to run...");
+                }
+                else
+                {
+                    Console.WriteLine("Shutting down...");
+                     Environment.Exit(0);
+                }
+            });
+            app.MapGet("/runAll", async () =>
+            {
+                Stopwatch stopwatch = new Stopwatch();
+                stopwatch.Start();
+                using var cts = new CancellationTokenSource();
+                var nodes = await QueryCustomAsync(driver, "Match (n) return n", cts.Token);
+                stopwatch.Stop(); Console.WriteLine($"All Nodes Returned in: {stopwatch.ElapsedMilliseconds} ms");
+                return Results.Json(nodes, new JsonSerializerOptions { WriteIndented = true });
+            });
 
             // Return movies directly as JSON
-            app.MapGet("/movies", () => uniqueMovies);
+            app.MapGet("/movies", async () =>
+            {
+                Stopwatch stopwatch = new Stopwatch();
+                stopwatch.Start();
+                
+                using var cts = new CancellationTokenSource();
+                var nodes = await QueryCustomAsync(driver, "Match (p:Movie) return p", cts.Token);
+                    stopwatch.Stop(); Console.WriteLine($"All Movies Returned in: {stopwatch.ElapsedMilliseconds} ms"); 
+                    return Results.Json(nodes, new JsonSerializerOptions { WriteIndented = true });
+                
+            });
+
+            app.MapGet("/people", async () =>
+            {
+                Stopwatch stopwatch = new Stopwatch();
+                stopwatch.Start();
+                using var cts = new CancellationTokenSource();
+                var nodes = await QueryCustomAsync(driver, "Match (p:Person) return p", cts.Token);
+                stopwatch.Stop(); Console.WriteLine($"All People Returned in: {stopwatch.ElapsedMilliseconds} ms"); 
+                return Results.Json(nodes, new JsonSerializerOptions { WriteIndented = true });
+            });
 
             // Custom query endpoint
             app.MapPost("/query", async (string cypher) =>
             {
-                var nodes = await ExecuteCustomQuery(driver, cypher);
-                return Results.Json(nodes);
+                Stopwatch stopwatch = new Stopwatch();
+                stopwatch.Start();
+                using var cts = new CancellationTokenSource();
+                var nodes = await QueryCustomAsync(driver, cypher, cts.Token);
+               
+                stopwatch.Stop(); Console.WriteLine($"All Cypher Returned in: {stopwatch.ElapsedMilliseconds} ms");   
+                return Results.Json(nodes, new JsonSerializerOptions { WriteIndented = true });
             });
 
             // Find movie by title
-            app.MapPost("/title", (string title) =>
+            app.MapPost("/title", async (string title) =>
             {
-                var movie = uniqueMovies
-                    .FirstOrDefault(m => m.Title.Equals(title, StringComparison.OrdinalIgnoreCase));
+                Stopwatch stopwatch = new Stopwatch();
+                stopwatch.Start();
 
-                return movie != null
-                    ? Results.Json(movie)
-                    : Results.NotFound("Movie not found");
+                using var cts = new CancellationTokenSource();
+                var nodes = await QueryCustomAsync(driver, "Match (p:Movie) return p", cts.Token);
+                
+               
+               var movies = nodes
+                .Where(node => node.Properties["title"].ToString()
+                    .Contains(title, StringComparison.OrdinalIgnoreCase))
+                .Select(node => new Movie(
+                    node.Properties["title"].ToString(),
+                    node.Properties["released"].As<long>(),
+                    node.Properties["tagline"].ToString()
+            ))
+               .ToList();
+
+
+                stopwatch.Stop(); Console.WriteLine($"\nMovie(s) Found in: {stopwatch.ElapsedMilliseconds} ms\n"); 
+                
+                if (nodes.Count == 0)
+                {
+                    return Results.NotFound("No movies found in database");
+                }
+                else
+                    return Results.Json(movies, new JsonSerializerOptions { WriteIndented = true });
+
             });
-
-            app.Run();
+            Console.WriteLine("SERVING ON WEB port 5000\n");
+            
+            await app.RunAsync();
+            
         }
 
-        private static async Task<List<NodeDto>> ExecuteCustomQuery(IDriver driver, string cypher)
+        static async Task<List<INode>> QueryCustomAsync(IDriver driver, string cypher, CancellationToken token)
         {
-            var cts = new CancellationTokenSource(TimeSpan.FromSeconds(30));
-            var results = await QueryCustomAsync(driver, cypher, cts.Token);
-            return results;
-        }
-
-        static async Task<List<NodeDto>> QueryCustomAsync(IDriver driver, string cypher, CancellationToken token)
-        {
-            var nodes = new List<NodeDto>();
+            var nodes = new List<INode>();
             await using var session = driver.AsyncSession(o => o.WithDatabase("neo4j"));
 
             var cursor = await session.RunAsync(cypher);
@@ -152,10 +196,7 @@ namespace Neo4JDotNetAttempt1
                 var node = record.Values.FirstOrDefault().Value?.As<INode>();
                 if (node != null)
                 {
-                    nodes.Add(new NodeDto(
-                        node.Id.ToString(),
-                        node.Properties.ToDictionary(kvp => kvp.Key, kvp => kvp.Value)
-                    ));
+                    nodes.Add(node);
                 }
             }
 
@@ -163,3 +204,5 @@ namespace Neo4JDotNetAttempt1
         }
     }
 }
+    
+
