@@ -1,111 +1,4 @@
-﻿using Neo4j.Driver;
-using System;
-using System.Collections.Generic;
-using System.Diagnostics;
-using System.Linq;
-using System.Threading;
-using System.Threading.Tasks;
-
-class Movie
-{
-    public Movie(string title, long released, string tagline)
-    {
-        Title = title;
-        Released = released;
-        Tagline = tagline;
-    }
-    public string Title { get; set; }
-    public long Released { get; set; }
-    public string Tagline { get; set; }
-
-    public override string ToString() => $"{Title} ({Released}) - \"{Tagline}\"";
-}
-
-class Program
-{
-    static async Task<List<Movie>> QueryMoviesAsync(IDriver driver, int queryId, CancellationToken token)
-    {
-        var movies = new List<Movie>();
-        await using var session = driver.AsyncSession(o => o.WithDatabase("neo4j"));
-
-        var result = await session.RunAsync("MATCH (n:Movie) RETURN n");
-
-        await foreach (var record in result.WithCancellation(token))
+﻿using Neo4j.Driver; using System; using System.Collections.Generic; using System.Diagnostics; using System.Linq; using System.Threading; using System.Threading.Tasks; using System.Text.Json; using Microsoft.AspNetCore.Builder; using Microsoft.Extensions.Hosting; using Swashbuckle.AspNetCore; using Microsoft.OpenApi;   class Movie {     public Movie(string title, long released, string tagline)     {         Title = title;         Released = released;         Tagline = tagline;     }     public string Title { get; set; }     public long Released { get; set; }     public string Tagline { get; set; }      public override string ToString() => $"\t{Title} ({Released}) - \"{Tagline}\""; }  class Program {     static async Task<List<Movie>> QueryMoviesAsync(IDriver driver, int queryId, CancellationToken token)     {         var movies = new List<Movie>();         await using var session = driver.AsyncSession(o => o.WithDatabase("neo4j"));          var result = await session.RunAsync("MATCH (n:Movie) RETURN n");          await foreach (var record in result.WithCancellation(token))         {             var node = record["n"]?.As<INode>();             if (node == null) continue;              node.Properties.TryGetValue("title", out var titleObj);             node.Properties.TryGetValue("released", out var releasedObj);             node.Properties.TryGetValue("tagline", out var taglineObj);              var title = titleObj?.ToString() ?? "Unknown";             var released = releasedObj.As<long>();             var tagline = taglineObj?.ToString() ?? "";              movies.Add(new Movie(title, released, tagline));         }          Console.WriteLine($"Query {queryId} finished with {movies.Count} movies");         return movies;     }      static async Task Main(string[] args)     {         var builder = WebApplication.CreateBuilder(args);         builder.Services.AddEndpointsApiExplorer();         builder.Services.AddSwaggerGen();         await using var driver = GraphDatabase.Driver(             "bolt://localhost:7687",             AuthTokens.Basic("neo4j", "password1")         );          await driver.VerifyConnectivityAsync();          var stopwatch = Stopwatch.StartNew();         int numSecondsPerQuery = 30;         // Create tasks with per-query CTS         var tasks = Enumerable.Range(1, 3).Select(async i =>         {             using var perQueryCts = new CancellationTokenSource();             perQueryCts.CancelAfter(TimeSpan.FromSeconds(numSecondsPerQuery)); // timeout per query 2 secs              try             {                 return await QueryMoviesAsync(driver, i, perQueryCts.Token);             }             catch (OperationCanceledException)             {                 Console.WriteLine($"Error: Query {i} timed out. Only {numSecondsPerQuery} seconds allowed per query. Database must be slow.");                 return new List<Movie>(); // return empty list on timeout             }         }).ToList();           // Wait for all queries to finish (or timeout individually)         var allResults = await Task.WhenAll(tasks);         stopwatch.Stop();          Console.WriteLine($"\nTask.WhenAll: all queries finished in {stopwatch.ElapsedMilliseconds} ms");          var allMovies = allResults.SelectMany(m => m).ToList();         //Console.WriteLine($"Total movies aggregated: {allMovies.Count}\n");         // Deduplicate by Title         var uniqueMovies = allMovies             .GroupBy(m => m.Title)             // group by title             .Select(g => g.First())            // take the first movie in each group             .ToList();          Console.WriteLine($"Total movies retrieved across all queries: {allMovies.Count}");         Console.WriteLine($"Unique movies after deduplication: {uniqueMovies.Count}\n");          //foreach (var movie in uniqueMovies)         //{         //    Console.WriteLine(movie.ToString());         //} **turn to JSON instead**              string jsonString = JsonSerializer.Serialize(uniqueMovies, new JsonSerializerOptions { WriteIndented = true });             Console.WriteLine(jsonString);          var app = builder.Build();                   // Enable Swagger middleware            app.UseSwagger();             app.UseSwaggerUI();                         Console.WriteLine("SERVING ON WEB port 5000");          app.MapGet("/", () => { return jsonString; });         app.Run();         while (true)
         {
-            var node = record["n"]?.As<INode>();
-            if (node == null) continue;
-
-            node.Properties.TryGetValue("title", out var titleObj);
-            node.Properties.TryGetValue("released", out var releasedObj);
-            node.Properties.TryGetValue("tagline", out var taglineObj);
-
-            var title = titleObj?.ToString() ?? "Unknown";
-            var released = releasedObj.As<long>();
-            var tagline = taglineObj?.ToString() ?? "";
-
-            movies.Add(new Movie(title, released, tagline));
-        }
-
-        Console.WriteLine($"Query {queryId} finished with {movies.Count} movies");
-        return movies;
-    }
-
-    static async Task Main()
-    {
-        await using var driver = GraphDatabase.Driver(
-            "bolt://localhost:7687",
-            AuthTokens.Basic("neo4j", "password1")
-        );
-
-        await driver.VerifyConnectivityAsync();
-
-        var stopwatch = Stopwatch.StartNew();
-
-        // Create tasks with per-query CTS
-        var tasks = Enumerable.Range(1, 3).Select(async i =>
-        {
-            using var perQueryCts = new CancellationTokenSource();
-            perQueryCts.CancelAfter(TimeSpan.FromSeconds(2)); // timeout per query 2 secs
-
-            try
-            {
-                return await QueryMoviesAsync(driver, i, perQueryCts.Token);
-            }
-            catch (OperationCanceledException)
-            {
-                Console.WriteLine($"⚠️ Query {i} timed out");
-                return new List<Movie>(); // return empty list on timeout
-            }
-        }).ToList();
-
-        try
-        {
-            // Wait for all queries to finish (or timeout individually)
-            var allResults = await Task.WhenAll(tasks);
-            stopwatch.Stop();
-
-            Console.WriteLine($"\nTask.WhenAll: all queries finished in {stopwatch.ElapsedMilliseconds} ms");
-
-            var allMovies = allResults.SelectMany(m => m).ToList();
-            //Console.WriteLine($"Total movies aggregated: {allMovies.Count}\n");
-            // Deduplicate by Title
-            var uniqueMovies = allMovies
-                .GroupBy(m => m.Title)             // group by title
-                .Select(g => g.First())            // take the first movie in each group
-                .ToList();
-
-            Console.WriteLine($"Total movies retrieved across all queries: {allMovies.Count}");
-            Console.WriteLine($"Unique movies after deduplication: {uniqueMovies.Count}\n");
-
-            foreach (var movie in uniqueMovies)
-            {
-                Console.WriteLine(movie);
-            }
-
-        }
-        catch (OperationCanceledException)
-        {
-            Console.WriteLine("⚠️ One or more queries cancelled.");
-        }
-    }
-}
+            Console.ReadLine();
+        }     } }
