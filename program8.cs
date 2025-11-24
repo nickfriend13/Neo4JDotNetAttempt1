@@ -155,15 +155,17 @@ namespace Neo4JDotNetAttempt1
                 using var cts = new CancellationTokenSource();
                 var nodes = await QueryCustomAsync(driver, "Match (p:Movie) return p", cts.Token);
                 
-               
+               var movieBuilder = new Neo4JDotNetAttempt1.Models.MovieBuilder();
                var movies = nodes
                 .Where(node => node.Properties["title"].ToString()
                     .Contains(title, StringComparison.OrdinalIgnoreCase))
-                .Select(node => new Movie(
-                    node.Properties["title"].ToString(),
-                    node.Properties["released"].As<long>(),
-                    node.Properties["tagline"].ToString()
-            ))
+                .Select(node => {
+                    movieBuilder.setTitle(node.Properties["title"].ToString());
+                    movieBuilder.setReleased(node.Properties["released"].As<long>());
+                    movieBuilder.setTagline(node.Properties["tagline"].ToString());
+                    return movieBuilder.Build();
+                    }
+            )
                .ToList();
 
 
