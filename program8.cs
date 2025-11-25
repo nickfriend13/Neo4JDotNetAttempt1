@@ -26,10 +26,46 @@ namespace Neo4JDotNetAttempt1
 
         public override string ToString() => $"\t{Title} ({Released}) - \"{Tagline}\"";
     }
+   
+public class Health
+{
+    private readonly PerformanceCounter cpu;
+    private readonly PerformanceCounter ram;
+    private float CpuUsage;
+    private float AvailableRAM;
 
-
-    class protected Program
+    public Health()
     {
+        cpu = new PerformanceCounter("Processor", "% Processor Time", "_Total");
+        ram = new PerformanceCounter("Memory", "Available MBytes");
+        CpuUsage = GetCurrentCpuUsage();
+        AvailableRAM = GetAvailableRAM();  
+    }
+
+    public float GetCurrentCpuUsage()
+    {
+        CpuUsage = cpu.NextValue();
+        Thread.Sleep(1000); // wait a second to get a valid reading
+        return CpuUsage;
+    }
+
+    public float GetAvailableRAM()
+    {
+        AvailableRAM = ram.NextValue();
+        return AvailableRAM;
+    }
+
+    public string GetHealthStatus()
+    {
+        return $"CPU Usage: {CpuUsage:F2}%, Available RAM: {AvailableRAM} MB";
+    }
+}
+
+
+
+    public static class Program
+    {
+
         // static async Task<List<Movie>> QueryMoviesAsync(IDriver driver, int queryId, CancellationToken token)
         // {
         //     var movies = new List<Movie>();
@@ -60,23 +96,38 @@ namespace Neo4JDotNetAttempt1
         //     Console.WriteLine($"Query {queryId} finished with {movies.Count} movies in {stopwatch.ElapsedMilliseconds}ms");
         //     return movies;
         // }
-        public async Task<IEnumerable<string>> GetActorsByFilmAsync(string filmTitle)
-        {
-            var query = @"
-                MATCH (actor:Person)-[:ACTED_IN]->(movie:Movie {title: $title})
-                RETURN actor.name AS Actor";
 
-            var session = _driver.AsyncSession();
-            try
-            {
-                var result = await session.RunAsync(query, new { title = filmTitle });
-                return await result.ToListAsync(r => r["Actor"].As<string>());
-            }
-            finally
-            {
-                await session.CloseAsync();
-            }
-        }
+
+
+
+public static async Task<List<(string Actor, string Movie, IDictionary<string, object> RelProps)>> GetActorsByFilmAsync(string filmTitle)
+{
+    var query = @"
+        MATCH (actor:Person)-[r:ACTED_IN]->(movie:Movie {title: $title})
+        RETURN actor.name AS Actor, movie.title AS Movie, properties(r) AS RelProps
+    ";
+
+    await using var driver = GraphDatabase.Driver("bolt://localhost:7687", AuthTokens.Basic("neo4j", "password1"));
+    await driver.VerifyConnectivityAsync();
+    var session = driver.AsyncSession();
+
+    try
+    {
+        var result = await session.RunAsync(query, new { title = filmTitle });
+        return await result.ToListAsync(record =>
+        (
+            Actor: record["Actor"].As<string>(),
+            Movie: record["Movie"].As<string>(),
+            RelProps: record["RelProps"].As<IDictionary<string, object>>()
+        ));
+    }
+    finally
+    {
+        await session.CloseAsync();
+    }
+}
+
+
 
         static async Task Main(string[] args)
         {
@@ -94,7 +145,7 @@ namespace Neo4JDotNetAttempt1
             await driver.VerifyConnectivityAsync();
             Console.WriteLine("Connected to Neo4j database.");
 
-            await app = builder.Build();
+            var app = builder.Build();
 
             app.UseHttpsRedirection();
             app.UseSwagger();
@@ -117,7 +168,25 @@ namespace Neo4JDotNetAttempt1
                      Environment.Exit(0);
                 }
             });
-            app.MapGet("/runAll", async () =>
+            app.MapGet("/isAlive", () => { return true; });
+
+            app.MapGet("/health", () =>
+            {
+                Stopwatch stopwatch = new Stopwatch();
+                stopwatch.Start();
+                var health = new Health();
+                var output = Results.Json(new
+                {
+                    CpuUsage = health.GetCurrentCpuUsage(),
+                    AvailableRam = health.GetAvailableRAM(),
+                    Status = health.GetHealthStatus()
+                });
+                stopwatch.Stop(); Console.WriteLine($"Health Check Returned in: {stopwatch.ElapsedMilliseconds} ms\n");
+                Console.WriteLine(health.GetHealthStatus());
+                return output;
+            });
+
+            app.MapGet("/getAllNodes", async () =>
             {
                 Stopwatch stopwatch = new Stopwatch();
                 stopwatch.Start();
@@ -127,13 +196,49 @@ namespace Neo4JDotNetAttempt1
                 return Results.Json(nodes, new JsonSerializerOptions { WriteIndented = true });
             });
 
-            app.MapGet("/findActorbyFilm/{title}", async (string title) =>
+            app.MapGet("/getAllRelationships", async () =>
             {
-                var programInstance = new Program();
-                programInstance._driver = driver; // Assign the driver to the instance
-                var actors = await programInstance.GetActorsByFilmAsync(title);
-                return Results.Json(actors, new JsonSerializerOptions { WriteIndented = true });
+                Stopwatch stopwatch = new Stopwatch();
+                stopwatch.Start();
+                using var cts = new CancellationTokenSource();
+                var nodes = await QueryRelationshipsAsync(driver, "Match ()-[r]->() return r", cts.Token);
+                stopwatch.Stop(); Console.WriteLine($"All Relationships Returned in: {stopwatch.ElapsedMilliseconds} ms");
+                return Results.Json(nodes, new JsonSerializerOptions { WriteIndented = true });
             });
+           
+            app.MapGet("/findActorsbyFilm/{title}", async (string title) =>
+            {
+                var stopwatch = new Stopwatch();
+                stopwatch.Start();
+
+                // Query Neo4j
+                var nodes = await GetActorsByFilmAsync(title);
+                    
+                // Project into Actor + Role pairs
+              var actorsAndRole = nodes.Select(n => new {
+                    Actor = n.Actor,
+                    Role = n.RelProps.TryGetValue("roles", out var rolesObj) ? string.Join(", ", (rolesObj as List<object>)?.Select(r => r.ToString()) ?? [])
+                        : "Unknown"
+                }).ToList();
+
+                Console.WriteLine($"Actors found for film '{title}':");
+                foreach (var ar in actorsAndRole)
+                {
+                    Console.WriteLine($"Actor: {ar.Actor}, Role: {ar.Role}");
+                }
+                // Build response object
+                var actorList = new
+                {
+                    Film = title,
+                    Actors = actorsAndRole // ✅ fixed casing
+                };
+
+                stopwatch.Stop();
+                Console.WriteLine($"Actors for film '{title}' returned in: {stopwatch.ElapsedMilliseconds} ms");
+
+                return Results.Json(actorList, new JsonSerializerOptions { WriteIndented = true });
+            });
+
 
 
             // Return movies directly as JSON
@@ -210,6 +315,7 @@ namespace Neo4JDotNetAttempt1
             
         }
 
+
         static async Task<List<INode>> QueryCustomAsync(IDriver driver, string cypher, CancellationToken token)
         {
             var nodes = new List<INode>();
@@ -229,7 +335,28 @@ namespace Neo4JDotNetAttempt1
 
             return nodes;
         }
-    }
+    
+        static async Task<List<IRelationship>> QueryRelationshipsAsync(IDriver driver, string cypher, CancellationToken token)
+        {
+            var relationships = new List<IRelationship>();
+            await using var session = driver.AsyncSession(o => o.WithDatabase("neo4j"));
+
+            var cursor = await session.RunAsync(cypher);
+            var records = await cursor.ToListAsync(token);
+
+            foreach (var record in records)
+            {
+                var relationship = record.Values.FirstOrDefault().Value?.As<IRelationship>();
+                if (relationship != null)
+                {
+                    relationships.Add(relationship);
+                }
+            }
+
+            return relationships;    
+        }
+    
+}
 }
     
 
