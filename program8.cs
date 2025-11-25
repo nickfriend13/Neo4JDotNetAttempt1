@@ -28,7 +28,7 @@ namespace Neo4JDotNetAttempt1
     }
 
 
-    class Program
+    class protected Program
     {
         // static async Task<List<Movie>> QueryMoviesAsync(IDriver driver, int queryId, CancellationToken token)
         // {
@@ -60,7 +60,23 @@ namespace Neo4JDotNetAttempt1
         //     Console.WriteLine($"Query {queryId} finished with {movies.Count} movies in {stopwatch.ElapsedMilliseconds}ms");
         //     return movies;
         // }
+        public async Task<IEnumerable<string>> GetActorsByFilmAsync(string filmTitle)
+        {
+            var query = @"
+                MATCH (actor:Person)-[:ACTED_IN]->(movie:Movie {title: $title})
+                RETURN actor.name AS Actor";
 
+            var session = _driver.AsyncSession();
+            try
+            {
+                var result = await session.RunAsync(query, new { title = filmTitle });
+                return await result.ToListAsync(r => r["Actor"].As<string>());
+            }
+            finally
+            {
+                await session.CloseAsync();
+            }
+        }
 
         static async Task Main(string[] args)
         {
@@ -78,7 +94,7 @@ namespace Neo4JDotNetAttempt1
             await driver.VerifyConnectivityAsync();
             Console.WriteLine("Connected to Neo4j database.");
 
-            var app = builder.Build();
+            await app = builder.Build();
 
             app.UseHttpsRedirection();
             app.UseSwagger();
@@ -110,6 +126,15 @@ namespace Neo4JDotNetAttempt1
                 stopwatch.Stop(); Console.WriteLine($"All Nodes Returned in: {stopwatch.ElapsedMilliseconds} ms");
                 return Results.Json(nodes, new JsonSerializerOptions { WriteIndented = true });
             });
+
+            app.MapGet("/findActorbyFilm/{title}", async (string title) =>
+            {
+                var programInstance = new Program();
+                programInstance._driver = driver; // Assign the driver to the instance
+                var actors = await programInstance.GetActorsByFilmAsync(title);
+                return Results.Json(actors, new JsonSerializerOptions { WriteIndented = true });
+            });
+
 
             // Return movies directly as JSON
             app.MapGet("/movies", async () =>
