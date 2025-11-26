@@ -26,7 +26,7 @@ namespace Neo4JDotNetAttempt1
 
         public override string ToString() => $"\t{Title} ({Released}) - \"{Tagline}\"";
     }
-   
+
 public class Health
 {
     private readonly PerformanceCounter cpu;
@@ -45,7 +45,7 @@ public class Health
     public float GetCurrentCpuUsage()
     {
         CpuUsage = cpu.NextValue();
-        Thread.Sleep(1000); // wait a second to get a valid reading
+        Task.Delay(1000); // wait a second to get a valid reading
         return CpuUsage;
     }
 
@@ -196,16 +196,50 @@ public static async Task<List<(string Actor, string Movie, IDictionary<string, o
                 return Results.Json(nodes, new JsonSerializerOptions { WriteIndented = true });
             });
 
-            app.MapGet("/getAllRelationships", async () =>
+           app.MapGet("/getAllRelationships", async () =>
             {
-                Stopwatch stopwatch = new Stopwatch();
-                stopwatch.Start();
-                using var cts = new CancellationTokenSource();
-                var nodes = await QueryRelationshipsAsync(driver, "Match ()-[r]->() return r", cts.Token);
-                stopwatch.Stop(); Console.WriteLine($"All Relationships Returned in: {stopwatch.ElapsedMilliseconds} ms");
-                return Results.Json(nodes, new JsonSerializerOptions { WriteIndented = true });
+                var stopwatch = Stopwatch.StartNew();
+
+                await using var session = driver.AsyncSession();
+                var cursor = await session.RunAsync("MATCH (a)-[r]->(b) RETURN a, r, b");
+                var records = await cursor.ToListAsync();
+
+                var results = records.Select(record =>
+                {
+                    var startNode = record["a"].As<INode>();
+                    var rel = record["r"].As<IRelationship>();
+                    var endNode = record["b"].As<INode>();
+
+                    return new
+                    {
+                        start = new
+                        {
+                            labels = startNode.Labels,
+                            properties = startNode.Properties,
+                            id = startNode.Id
+                        },
+                        relationship = new
+                        {
+                            type = rel.Type,
+                            roles = rel.Properties.TryGetValue("roles", out var rolesObj)
+                                ? (rolesObj as List<object>)?.Select(r => r.ToString()).ToList()
+                                : new List<string>()
+                        },
+                        end = new
+                        {
+                            labels = endNode.Labels,
+                            properties = endNode.Properties,
+                            id = endNode.Id
+                        }
+                    };
+                }).ToList();
+
+                stopwatch.Stop();
+                Console.WriteLine($"All Relationships Returned in: {stopwatch.ElapsedMilliseconds} ms");
+
+                return Results.Json(results, new JsonSerializerOptions { WriteIndented = true });
             });
-           
+
             app.MapGet("/findActorsbyFilm/{title}", async (string title) =>
             {
                 var stopwatch = new Stopwatch();
@@ -263,6 +297,40 @@ public static async Task<List<(string Actor, string Movie, IDictionary<string, o
                 stopwatch.Stop(); Console.WriteLine($"All People Returned in: {stopwatch.ElapsedMilliseconds} ms"); 
                 return Results.Json(nodes, new JsonSerializerOptions { WriteIndented = true });
             });
+            app.MapPost("/title", async (string title) =>
+            {
+                Stopwatch stopwatch = new Stopwatch();
+                stopwatch.Start();
+
+                var cypher = @"
+                    MATCH (m:Movie)
+                    WHERE toLower(m.title) CONTAINS toLower($title)
+                    RETURN m
+                ";
+
+                await using var session = driver.AsyncSession();
+                var cursor = await session.RunAsync(cypher, new { title });
+
+                var results = await cursor.ToListAsync(record =>
+                {
+                    var node = record["m"].As<INode>();
+
+                    return new
+                    {
+                        Title = node.Properties["title"].As<string>(),
+                        Released = node.Properties["released"].As<long>(),
+                        Tagline = node.Properties["tagline"].As<string>()
+                    };
+                });
+
+                stopwatch.Stop();
+                Console.WriteLine($"Movie search returned in {stopwatch.ElapsedMilliseconds}ms");
+
+                if (results.Count == 0)
+                    return Results.NotFound("No movies found");
+
+                return Results.Json(results, new JsonSerializerOptions { WriteIndented = true });
+            });
 
             // Custom query endpoint
             app.MapPost("/query", async (string cypher) =>
@@ -275,50 +343,67 @@ public static async Task<List<(string Actor, string Movie, IDictionary<string, o
                 stopwatch.Stop(); Console.WriteLine($"All Cypher Returned in: {stopwatch.ElapsedMilliseconds} ms");   
                 return Results.Json(nodes, new JsonSerializerOptions { WriteIndented = true });
             });
-
-            // Find movie by title
-            app.MapPost("/title", async (string title) =>
+            app.MapGet("/paths", async () =>
             {
                 Stopwatch stopwatch = new Stopwatch();
                 stopwatch.Start();
+                await using var session = driver.AsyncSession();
 
-                using var cts = new CancellationTokenSource();
-                var nodes = await QueryCustomAsync(driver, "Match (p:Movie) return p", cts.Token);
-                
-               var movieBuilder = new Neo4JDotNetAttempt1.Models.MovieBuilder();
-               var movies = nodes
-                .Where(node => node.Properties["title"].ToString()
-                    .Contains(title, StringComparison.OrdinalIgnoreCase))
-                .Select(node => {
-                    movieBuilder.setTitle(node.Properties["title"].ToString());
-                    movieBuilder.setReleased(node.Properties["released"].As<long>());
-                    movieBuilder.setTagline(node.Properties["tagline"].ToString());
-                    return movieBuilder.Build();
-                    }
-            )
-               .ToList();
+                var cursor = await session.RunAsync(
+                    "MATCH p = (a)-[r]->(b) RETURN p as Path");
 
+                var paths = await cursor.ToListAsync(record =>
+                    record["Path"].As<IPath>());
 
-                stopwatch.Stop(); Console.WriteLine($"\nMovie(s) Found in: {stopwatch.ElapsedMilliseconds} ms\n"); 
-                
-                if (nodes.Count == 0)
-                {
-                    return Results.NotFound("No movies found in database");
-                }
-                else
-                    return Results.Json(movies, new JsonSerializerOptions { WriteIndented = true });
-
+                var dto = paths.Select(p => p).ToList();
+                stopwatch.Stop(); Console.WriteLine($"All Paths Returned in: {stopwatch.ElapsedMilliseconds} ms");
+                return Results.Json(dto);
             });
-            Console.WriteLine("SERVING ON WEB port 5000\n");
-            
-            await app.RunAsync();
-            
-        }
 
+            // Find movie by title
+            
 
-        static async Task<List<INode>> QueryCustomAsync(IDriver driver, string cypher, CancellationToken token)
+        static async Task<List<object>> QueryCustomAsync(IDriver driver, string cypher, CancellationToken token)
+{
+    var items = new List<object>();
+
+    await using var session = driver.AsyncSession(o => o.WithDatabase("neo4j"));
+    var cursor = await session.RunAsync(cypher);
+    var records = await cursor.ToListAsync(token);
+
+    foreach (var record in records)
+{
+    foreach (var kv in record.Values)
+    {
+        switch (kv.Value)
         {
-            var nodes = new List<INode>();
+            case INode node:
+                items.Add(new {
+                    Type = "Node",
+                    Id = node.Id,
+                    Labels = node.Labels,
+                    Properties = node.Properties
+                });
+                break;
+
+            case IRelationship rel:
+                items.Add(new {
+                    Type = "Relationship",
+                    Id = rel.Id,
+                    RelType = rel.Type,
+                    StartNode = rel.StartNodeId,
+                    EndNode = rel.EndNodeId,
+                    Properties = rel.Properties
+                });
+                break;
+        }
+    }
+}
+    return items;
+}
+        static async Task<List<Object>> QueryRelationshipsAsync(IDriver driver, string cypher, CancellationToken token)
+        {
+            var relationships = new List<Object>();
             await using var session = driver.AsyncSession(o => o.WithDatabase("neo4j"));
 
             var cursor = await session.RunAsync(cypher);
@@ -326,37 +411,21 @@ public static async Task<List<(string Actor, string Movie, IDictionary<string, o
 
             foreach (var record in records)
             {
-                var node = record.Values.FirstOrDefault().Value?.As<INode>();
-                if (node != null)
-                {
-                    nodes.Add(node);
-                }
-            }
-
-            return nodes;
-        }
-    
-        static async Task<List<IRelationship>> QueryRelationshipsAsync(IDriver driver, string cypher, CancellationToken token)
-        {
-            var relationships = new List<IRelationship>();
-            await using var session = driver.AsyncSession(o => o.WithDatabase("neo4j"));
-
-            var cursor = await session.RunAsync(cypher);
-            var records = await cursor.ToListAsync(token);
-
-            foreach (var record in records)
-            {
-                var relationship = record.Values.FirstOrDefault().Value?.As<IRelationship>();
-                if (relationship != null)
-                {
-                    relationships.Add(relationship);
-                }
+                var rel = record["r"].As<IRelationship>();
+                relationships.Add(new {
+                    Type = "Relationship",
+                    Id = rel.Id,
+                    RelType = rel.Type,
+                    StartNode = rel.StartNodeId,
+                    EndNode = rel.EndNodeId,
+                    Properties = rel.Properties
+                });
             }
 
             return relationships;    
         }
-    
+    await app.RunAsync();
 }
-}
+}}
     
 
