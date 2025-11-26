@@ -204,35 +204,34 @@ public static async Task<List<(string Actor, string Movie, IDictionary<string, o
                 var cursor = await session.RunAsync("MATCH (a)-[r]->(b) RETURN a, r, b");
                 var records = await cursor.ToListAsync();
 
-                var results = records.Select(record =>
-                {
-                    var startNode = record["a"].As<INode>();
-                    var rel = record["r"].As<IRelationship>();
-                    var endNode = record["b"].As<INode>();
-
-                    return new
+               var results = records.Select(record =>
                     {
-                        start = new
+                        var startNode = record["a"].As<INode>();
+                        var rel = record["r"].As<IRelationship>();
+                        var endNode = record["b"].As<INode>();
+
+                        var dto = new 
                         {
-                            labels = startNode.Labels,
-                            properties = startNode.Properties,
-                            id = startNode.Id
-                        },
-                        relationship = new
-                        {
-                            type = rel.Type,
-                            roles = rel.Properties.TryGetValue("roles", out var rolesObj)
-                                ? (rolesObj as List<object>)?.Select(r => r.ToString()).ToList()
-                                : new List<string>()
-                        },
-                        end = new
-                        {
-                            labels = endNode.Labels,
-                            properties = endNode.Properties,
-                            id = endNode.Id
-                        }
-                    };
-                }).ToList();
+                            Start = new  {
+                                Id = startNode.Id,
+                                Labels = startNode.Labels,
+                                Properties = startNode.Properties
+                            },
+                            Relationship = new {
+                                Type = rel.Type,
+                                Roles = rel.TryGet<object>("roles", out var rolesObj) ? (rolesObj as List<object>)?.Select(r => r.ToString()).ToList() : null,
+                            },
+                            End = new  {
+                                Id = endNode.Id,
+                                Labels = endNode.Labels,
+                                Properties = endNode.Properties
+                            }
+                        };
+
+                        
+
+                        return dto;
+                    }).ToList();
 
                 stopwatch.Stop();
                 Console.WriteLine($"All Relationships Returned in: {stopwatch.ElapsedMilliseconds} ms");
@@ -357,7 +356,7 @@ public static async Task<List<(string Actor, string Movie, IDictionary<string, o
 
                 var dto = paths.Select(p => p).ToList();
                 stopwatch.Stop(); Console.WriteLine($"All Paths Returned in: {stopwatch.ElapsedMilliseconds} ms");
-                return Results.Json(dto);
+                return Results.Json(dto, new JsonSerializerOptions { WriteIndented = true });
             });
 
             // Find movie by title
